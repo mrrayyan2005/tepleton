@@ -1,0 +1,34 @@
+package: github.com/tepleton/go-crypto
+import:
+- package: github.com/btcsuite/btcd
+  subpackages:
+  - btcec
+- package: github.com/btcsuite/btcutil
+  subpackages:
+  - base58
+- package: github.com/howeyc/crc16
+- package: github.com/pkg/errors
+  version: ^0.8.0
+- package: github.com/tepleton/ed25519
+  subpackages:
+  - extra25519
+- package: github.com/tepleton/go-wire
+  version: develop
+- package: github.com/tepleton/tmlibs
+  version: develop
+  subpackages:
+  - common
+  - db
+- package: golang.org/x/crypto
+  subpackages:
+  - blowfish
+  - nacl/secretbox
+  - openpgp/armor
+  - ripemd160
+testImport:
+- package: github.com/stretchr/testify
+  version: ^1.2.1
+  subpackages:
+  - assert
+  - require
+- package: github.com/tyler-smith/go-bip39

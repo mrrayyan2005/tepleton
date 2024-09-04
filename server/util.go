@@ -1,0 +1,175 @@
+package server
+
+import (
+	"encoding/json"
+	"net"
+	"os"
+	"path/filepath"
+
+	"github.com/pkg/errors"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+
+	"github.com/tepleton/tepleton-sdk/client"
+	"github.com/tepleton/tepleton-sdk/version"
+	"github.com/tepleton/tepleton-sdk/wire"
+	tcmd "github.com/tepleton/tepleton/cmd/tepleton/commands"
+	cfg "github.com/tepleton/tepleton/config"
+	"github.com/tepleton/tepleton/libs/cli"
+	tmflags "github.com/tepleton/tepleton/libs/cli/flags"
+	"github.com/tepleton/tepleton/libs/log"
+)
+
+// server context
+type Context struct {
+	Config *cfg.Config
+	Logger log.Logger
+}
+
+func NewDefaultContext() *Context {
+	return NewContext(
+		cfg.DefaultConfig(),
+		log.NewTMLogger(log.NewSyncWriter(os.Stdout)),
+	)
+}
+
+func NewContext(config *cfg.Config, logger log.Logger) *Context {
+	return &Context{config, logger}
+}
+
+//___________________________________________________________________________________
+
+// PersistentPreRunEFn returns a PersistentPreRunE function for cobra
+// that initailizes the passed in context with a properly configured
+// logger and config objecy
+func PersistentPreRunEFn(context *Context) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if cmd.Name() == version.VersionCmd.Name() {
+			return nil
+		}
+		config, err := interceptLoadConfig()
+		if err != nil {
+			return err
+		}
+		logger := log.NewTMLogger(log.NewSyncWriter(os.Stdout))
+		logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, cfg.DefaultLogLevel())
+		if err != nil {
+			return err
+		}
+		if viper.GetBool(cli.TraceFlag) {
+			logger = log.NewTracingLogger(logger)
+		}
+		logger = logger.With("module", "main")
+		context.Config = config
+		context.Logger = logger
+		return nil
+	}
+}
+
+// If a new config is created, change some of the default tepleton settings
+func interceptLoadConfig() (conf *cfg.Config, err error) {
+	tmpConf := cfg.DefaultConfig()
+	err = viper.Unmarshal(tmpConf)
+	if err != nil {
+		// TODO: Handle with #870
+		panic(err)
+	}
+	rootDir := tmpConf.RootDir
+	configFilePath := filepath.Join(rootDir, "config/config.toml")
+	// Intercept only if the file doesn't already exist
+	if _, err := os.Stat(configFilePath); os.IsNotExist(err) {
+		// the following parse config is needed to create directories
+		sdkDefaultConfig, _ := tcmd.ParseConfig()
+		sdkDefaultConfig.ProfListenAddress = "prof_laddr=localhost:6060"
+		sdkDefaultConfig.P2P.RecvRate = 5120000
+		sdkDefaultConfig.P2P.SendRate = 5120000
+		cfg.WriteConfigFile(configFilePath, sdkDefaultConfig)
+		// Fall through, just so that its parsed into memory.
+	}
+	conf, err = tcmd.ParseConfig()
+	return
+}
+
+// add server commands
+func AddCommands(
+	ctx *Context, cdc *wire.Codec,
+	rootCmd *cobra.Command, appInit AppInit,
+	appCreator AppCreator, appExport AppExporter) {
+
+	rootCmd.PersistentFlags().String("log_level", ctx.Config.LogLevel, "Log level")
+
+	tepletonCmd := &cobra.Command{
+		Use:   "tepleton",
+		Short: "Tendermint subcommands",
+	}
+
+	tepletonCmd.AddCommand(
+		ShowNodeIDCmd(ctx),
+		ShowValidatorCmd(ctx),
+	)
+
+	rootCmd.AddCommand(
+		InitCmd(ctx, cdc, appInit),
+		TestnetFilesCmd(ctx, cdc, appInit),
+		StartCmd(ctx, appCreator),
+		UnsafeResetAllCmd(ctx),
+		client.LineBreak,
+		tepletonCmd,
+		ExportCmd(ctx, cdc, appExport),
+		client.LineBreak,
+		version.VersionCmd,
+	)
+}
+
+//___________________________________________________________________________________
+
+// append a new json field to existing json message
+func AppendJSON(cdc *wire.Codec, baseJSON []byte, key string, value json.RawMessage) (appended []byte, err error) {
+	var jsonMap map[string]json.RawMessage
+	err = cdc.UnmarshalJSON(baseJSON, &jsonMap)
+	if err != nil {
+		return nil, err
+	}
+	jsonMap[key] = value
+	bz, err := wire.MarshalJSONIndent(cdc, jsonMap)
+	return json.RawMessage(bz), err
+}
+
+// https://stackoverflow.com/questions/23558425/how-do-i-get-the-local-ip-address-in-go
+// TODO there must be a better way to get external IP
+func externalIP() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue // interface down
+		}
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue // loopback interface
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			return "", err
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ip = ip.To4()
+			if ip == nil {
+				continue // not an ipv4 address
+			}
+			return ip.String(), nil
+		}
+	}
+	return "", errors.New("are you connected to the network?")
+}
